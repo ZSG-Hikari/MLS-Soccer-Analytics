@@ -1,4 +1,4 @@
-# MLS Player Archetypes & Anomaly Detection (Portfolio Repo)
+# MLS Player Archetypes & Anomaly Detection
 
 This repo showcases a soccer analytics project using MLS player data to:
 - compare offensive vs defensive production,
