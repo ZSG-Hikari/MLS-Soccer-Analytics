@@ -6,7 +6,7 @@ This repo showcases a soccer analytics project using MLS player data to:
 - flag outlier players who over/underperform relative to simple physical-trait baselines.
 
 ## What to look at first
-- **Project analysis (RMarkdown):** `analysis/MLSPlayers_Analysis.Rmd`
+- **Project analysis (RMarkdown):** `analysis/MLSPlayers_Analysis.Rmd` and Variables_Description
 - **Cleaned dataset:** `data/MLS_combined_data_cleaned.csv`
 - **Key visuals:** `outputs/figures/`
 
