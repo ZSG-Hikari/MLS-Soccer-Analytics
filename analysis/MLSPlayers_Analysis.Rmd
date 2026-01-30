@@ -1,0 +1,1457 @@
+
+---
+title: "Final R Code - MLS Players Analysis"
+date: "2025-04-25"
+---
+
+```{r} 
+
+# Using GET function to import player xgoals and goals data, along with other variables
+# getting raw data of MLS Players from API
+library(httr)
+library(jsonlite)
+
+url <- "https://app.americansocceranalysis.com/api/v1/mls/players/xgoals"
+
+response <- GET(url, add_headers("accept" = "application/json"))
+
+if (status_code(response) == 200) {
+  data <- content(response, as = "text", encoding = "UTF-8")
+  MLS_players <- fromJSON(data)
+  
+} else {
+  print(paste("Error:", status_code(response)))
+}
+
+```
+
+```{r}
+#Checking the total number of missing MLS_players data 
+sum(is.na(MLS_players))
+```
+
+```{r}
+# Check if any columns are still lists
+str(MLS_players)  
+```
+
+```{r}
+summary(MLS_players)
+```
+
+```{r}
+# Download the MLS players raw dataset 
+#install.packages('dplyr')
+library(dplyr)
+# Flatten any remaining lists into strings
+MLS_players <- MLS_players |>
+  mutate(across(where(is.list), ~sapply(., toString)))  # Convert lists to character strings
+
+# Save data to CSV
+write.csv(MLS_players, "MLS_players_data.csv", row.names = FALSE)
+
+```
+
+```{r}
+# getting the raw data for MLS Player names
+#Running second API link to extract player names
+
+url2 = "https://app.americansocceranalysis.com/api/v1/mls/players"
+
+response = GET(url2, add_headers("accept" = "application/json"))
+
+if (status_code(response) == 200) {
+  data2 = content(response, as = "text", encoding = "UTF-8")
+  MLS_player_names_raw = fromJSON(data2)
+
+} else {
+  print(paste("Error:", status_code(response)))
+}
+```
+
+```{r}
+#Checking the total number of missing MLS player names data 
+sum(is.na(MLS_player_names_raw))
+```
+
+```{r}
+# Download the MLS player names raw dataset
+# Convert list columns to character strings before saving
+MLS_player_names_raw <- as.data.frame(MLS_player_names_raw)  # to ensure it is a data frame
+MLS_player_names_raw[] <- lapply(MLS_player_names_raw, function(x) if(is.list(x)) sapply(x, toString) else x)
+
+# Save to CSV, MLS player names csv - raw data
+write.csv(MLS_player_names_raw, "MLS_player_names.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+#Combining height_ft and height_in by creating one column entitled height_cm
+
+library(dplyr)
+
+MLS_player_names = MLS_player_names_raw|>
+  mutate(height_cm = height_ft*30.48 + height_in*2.54)|>
+  select(-height_ft,-height_in)
+
+MLS_player_names
+```
+
+```{r}
+#Next we wanted to find a good yet realistic way to impute what position a player plays based on available data
+library(dplyr)
+
+MLS_player_names = MLS_player_names|>
+  mutate(primary_general_position = case_when(
+    is.na(primary_general_position) & height_cm >= 190 ~ "GK",  
+    is.na(primary_general_position) & height_cm >= 185 & weight_lb >= 190 ~ "CB",   
+    is.na(primary_general_position) & height_cm <= 175 & weight_lb <= 160 ~ "W", 
+    is.na(primary_general_position) & height_cm >= 175 & height_cm <= 185 & weight_lb >= 170 ~ "CM", 
+    is.na(primary_general_position) & height_cm >= 175 & weight_lb <= 165 ~ "FB", 
+    is.na(primary_general_position) & weight_lb > 180 ~ "ST",   
+    is.na(primary_general_position) ~ "DM",   
+    TRUE ~ primary_general_position  
+  ))
+
+# I then used these values to predict broad position, DF for defender, MF for midfielder and FW for forward. GK stayed as keepers
+
+MLS_player_names = MLS_player_names |>
+  mutate(primary_broad_position = case_when(
+    is.na(primary_broad_position) & primary_general_position %in% c("CB", "FB", "WB") ~ "DF",
+    is.na(primary_broad_position) & primary_general_position %in% c("CM", "DM", "AM") ~ "MF",
+    is.na(primary_broad_position) & primary_general_position %in% c("ST", "SS", "W") ~ "FW",
+    is.na(primary_broad_position) & primary_general_position == "GK" ~ "GK",
+    TRUE ~ primary_broad_position
+  ))
+
+#same logic again for exact position based on common occurences
+
+MLS_player_names <- MLS_player_names |>
+  mutate(secondary_general_position = case_when(
+    is.na(secondary_general_position) & primary_general_position == "CB" ~ "FB",
+    is.na(secondary_general_position) & primary_general_position == "FB" ~ "WB",
+    is.na(secondary_general_position) & primary_general_position == "WB" ~ "FB",
+    is.na(secondary_general_position) & primary_general_position == "CM" ~ "DM",
+    is.na(secondary_general_position) & primary_general_position == "DM" ~ "CM",
+    is.na(secondary_general_position) & primary_general_position == "AM" ~ "W",
+    is.na(secondary_general_position) & primary_general_position == "ST" ~ "W",
+    is.na(secondary_general_position) & primary_general_position == "W" ~ "ST",
+    is.na(secondary_general_position) & primary_broad_position == "GK" ~ "GK",
+    TRUE ~ secondary_general_position
+  ))
+
+#then for secondary broad position, used the logic that defenders also midfield (pep formation), midfielders sometimes drop back to cb, forwards sometimes cover in midfield, while goalkeepers is not malleabale
+
+MLS_player_names <- MLS_player_names |>
+  mutate(secondary_broad_position = case_when(
+    # Defenders (DF) should have defender-related secondary positions
+    secondary_general_position %in% c("CB", "FB", "WB") ~ "DF",
+    
+    # Midfielders (MF) should have midfield-related secondary positions
+    secondary_general_position %in% c("CM", "DM", "AM") ~ "MF",
+    
+    # Forwards (FW) should have attacking-related secondary positions
+    secondary_general_position %in% c("ST", "SS", "W") ~ "FW",
+    
+    # Goalkeepers (GK) remain goalkeepers
+    secondary_general_position == "GK" ~ "GK",
+    
+    # If secondary position is missing, default to the broad position of primary
+    is.na(secondary_broad_position) ~ primary_broad_position,
+    
+    # Otherwise, keep existing secondary_broad_position
+    TRUE ~ secondary_broad_position
+  ))
+
+```
+
+```{r}
+#Data cleaning
+#Cleaning data in columns height_cm and weight_lb through imputation using mean and rounding it off to the nearest integer
+#Handling the missing values for height
+
+MLS_player_names <- MLS_player_names |>
+  group_by(primary_general_position) |>
+  mutate(height_cm = ifelse(is.na(height_cm), as.integer(round(mean(height_cm, na.rm = TRUE))), as.integer(height_cm))) |>
+  ungroup()
+
+#Handling the missing values for weight
+MLS_player_names <- MLS_player_names |>
+  group_by(primary_general_position) |>
+  mutate(weight_lb = ifelse(is.na(weight_lb), as.integer(round(mean(weight_lb, na.rm = TRUE))), as.integer(weight_lb))) |>
+  ungroup()
+
+```
+
+```{r}
+#keeping "Unknown" for the missing player name
+MLS_player_names$player_name[is.na(MLS_player_names$player_name)] <- "Unknown"
+```
+
+```{r}
+#missing season name - undebuted players, assuming the season to be 2026
+MLS_player_names$season_name <- ifelse(is.na(MLS_player_names$season_name) | MLS_player_names$season_name == "", "2026", MLS_player_names$season_name)
+```
+
+```{r}
+library(dplyr)
+
+# Fix missing values in nationality
+nationality_counts <- MLS_player_names |>
+  filter(!is.na(nationality)) |>
+  count(nationality, sort = TRUE)
+
+# Extract most common nationality
+most_common_nationality <- nationality_counts$nationality[1]
+
+# Replace NA values with the most common nationality
+MLS_player_names$nationality[is.na(MLS_player_names$nationality)] <- most_common_nationality
+
+```
+
+```{r}
+#Check Missing Values
+sum(is.na(MLS_player_names$secondary_broad_position))
+```
+
+```{r}
+colSums(is.na(MLS_player_names))
+```
+
+```{r}
+# Download the update MLS player names file, after the data cleaning
+# Convert list columns to character strings before saving
+MLS_player_names[] <- lapply(MLS_player_names, function(x) if(is.list(x)) sapply(x, toString) else x)
+
+# Save to CSV
+write.csv(MLS_player_names, "MLS_player_names_updated.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+#Combining the MLS_players and MLS_player_names data, taking the key column as player_id
+# Load necessary libraries
+library(dplyr)
+
+# Read in the two CSV files (if not already in memory)
+MLS_players <- read.csv("MLS_players_data.csv") 
+MLS_player_names <- read.csv("MLS_player_names_updated.csv")
+
+# Check common columns
+intersect(names(MLS_players), names(MLS_player_names)) 
+
+# Merge datasets based on player_id
+MLS_combined <- MLS_players |>
+  inner_join(MLS_player_names, by = "player_id")
+
+# Flatten any remaining list columns (if any exist)
+list_columns <- sapply(MLS_combined, is.list)
+print(names(MLS_combined)[list_columns])  # Shows which columns contain lists
+
+MLS_combined <- MLS_combined |>
+  mutate(across(where(is.list), ~sapply(., function(x) paste(unlist(x), collapse = ", "))))
+
+# Check structure after merging
+str(MLS_combined)
+
+# Save the combined dataset
+write.csv(MLS_combined, "MLS_combined_data_cleaned.csv", row.names = FALSE)
+
+```
+
+```{r}
+#Data Visualization on our Research questions
+#goals vs. xgoals (Performance Analysis) - Compare expected goals (xgoals) vs actual goals
+#output - scatter plot with trendline
+#install.packages('ggplot2')
+library(ggplot2)
+ggplot(MLS_players, aes(x = xgoals, y = goals)) +
+  geom_point(color = "purple") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") + 
+  labs(title = "xgoals vs actual goals in MLS players",
+       x = "expected goals (xgoals)",
+       y = "actual goals") +
+  theme_minimal()
+
+```
+
+```{r}
+#Does the height of a defensive player affect their team contribution, when comparing expected points added to actual points added?
+#Defenders Height vs Expected Points Contribution (xplace)
+#output - scatter plot with a regression trendline
+library(ggplot2)
+library(dplyr)
+# Filter dataset for defensive players only
+df_defenders <- MLS_combined |>
+  filter(primary_broad_position == "DF") |>
+  filter(!is.na(height_cm) & !is.na(xplace))
+
+# Scatter plot comparing height vs. expected points contribution (xplace)
+ggplot(df_defenders, aes(x = height_cm, y = xplace)) +
+  geom_point(color = "green", alpha = 0.7, size = 3) +  # Scatter points
+  geom_smooth(method = "lm", se = FALSE, color = "red", linetype = "dashed") +  # Trend line
+  
+  labs(title = "Defensive Players: Height vs Expected Points Contribution (xplace)",
+       x = "Height (cm)",
+       y = "Expected Points Added (xplace)") +
+  theme_minimal()
+
+
+```
+
+```{r}
+# Height vs Actual Points Added (where actual points is - points_added column)
+#Blue dots - Each dot represents a defensive player
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+
+# Filter dataset for defensive players only
+df_defenders <- MLS_combined %>%
+  filter(primary_broad_position == "DF") %>%
+  filter(!is.na(height_cm) & !is.na(points_added))  # Remove missing values
+
+# Scatter plot: Defender Height vs Actual Points Added
+ggplot(df_defenders, aes(x = height_cm, y = points_added)) +
+  geom_point(color = "blue", alpha = 0.7, size = 3) +  # Scatter points
+  geom_smooth(method = "lm", se = FALSE, color = "red", linetype = "dashed") +  # Trend line
+  labs(
+    title = "Defensive Players: Height vs Actual Points Contribution",
+    x = "Height (cm)",
+    y = "Actual Points Added",
+    caption = "Red line represents linear trend"
+  ) +
+  theme_minimal()
+
+```
+
+
+```{r}
+#Does the weight of a midfield and forward player affect their team contribution, particularly in relation to their expected goals and primary assists versus actual goals and primary assists?
+
+
+#Weight vs Goals (Expected vs Actual)
+#output- Scatter Plot with Dual Data Series
+
+library(ggplot2)
+library(dplyr)
+
+# Filter dataset for midfielders (MF) and forwards (FW)
+df_mf_fw <- MLS_combined |>
+  filter(primary_broad_position %in% c("MF", "FW")) |>
+  filter(!is.na(weight_lb) & !is.na(xgoals) & !is.na(goals))  
+
+# Scatter plot: Weight vs Goals (Expected vs Actual)
+ggplot(df_mf_fw, aes(x = weight_lb)) +
+  # Expected Goals (xGoals)
+  geom_point(aes(y = xgoals, color = "Expected Goals"), alpha = 0.7, size = 3) +
+  geom_smooth(aes(y = xgoals, color = "Expected Goals"), method = "lm", se = FALSE, linetype = "dashed") +
+  
+  # Actual Goals
+  geom_point(aes(y = goals, color = "Actual Goals"), alpha = 0.7, size = 3) +
+  geom_smooth(aes(y = goals, color = "Actual Goals"), method = "lm", se = FALSE, linetype = "dashed") +
+  
+  labs(title = "Midfielders & Forwards: Weight vs Goals (Expected vs Actual)",
+       x = "Weight (lbs)",
+       y = "Goals",
+       color = "Legend") +
+  theme_minimal()
+
+```
+```{r}
+#Weight vs Assists (Expected vs Actual)
+#output - #Scatter Plot with Dual Data Series
+#First plot: Expected assists (xassists) ; Second plot: Actual assists (primary_assists).
+
+library(ggplot2)
+library(dplyr)
+
+# Check available columns
+colnames(MLS_combined)
+
+# Filter dataset for midfielders (MF) and forwards (FW)
+df_mf_fw_assists <- MLS_combined |>
+  filter(primary_broad_position %in% c("MF", "FW")) |>
+  filter(!is.na(weight_lb) & !is.na(xassists) & !is.na(primary_assists))
+
+# Scatter plot: Weight vs Assists (Expected vs Actual)
+ggplot(df_mf_fw_assists, aes(x = weight_lb)) +
+  # Expected Assists (xAssists)
+  geom_point(aes(y = xassists, color = "Expected Assists"), alpha = 0.7, size = 3) +
+  geom_smooth(aes(y = xassists, color = "Expected Assists"), method = "lm", se = FALSE, linetype = "dashed") +
+  
+  # Actual Assists (Primary Assists)
+  geom_point(aes(y = primary_assists, color = "Actual Assists"), alpha = 0.7, size = 3) +
+  geom_smooth(aes(y = primary_assists, color = "Actual Assists"), method = "lm", se = FALSE, linetype = "dashed") +
+  
+  labs(title = "Midfielders & Forwards: Weight vs Assists (Expected vs Actual)",
+       x = "Weight (lbs)",
+       y = "Primary Assists",
+       color = "Legend") +
+  theme_minimal()
+
+```
+
+
+*Research Question: Does position influence player performance in terms of goals, primary assists, and points added?*
+
+
+```{r}
+# Load libraries
+library(dplyr)
+library(ggplot2)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(lubridate)
+
+# Load dataset
+mls <- read.csv("/Users/pallavigudipati/Desktop/Columbia-sem-II/MLS_combined_data_cleaned.csv")
+
+# Convert birth date to age
+mls$birth_date <- as.Date(mls$birth_date)
+mls$age <- as.numeric(difftime(as.Date("2025-01-01"), mls$birth_date, units = "weeks")) %/% 52
+
+# Map general position to broad group
+mls <- mls %>%
+  mutate(primary_broad_position = case_when(
+    primary_general_position %in% c("CB", "FB", "WB") ~ "DF",
+    primary_general_position %in% c("CM", "DM", "AM") ~ "MF",
+    primary_general_position %in% c("ST", "SS", "W") ~ "FW",
+    primary_general_position == "GK" ~ "GK",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(position_group = case_when(
+    primary_broad_position %in% c("FW", "MF") ~ "Offensive",
+    primary_broad_position %in% c("DF", "GK") ~ "Defensive",
+    TRUE ~ NA_character_
+  ))
+
+# Filter and select relevant data
+mls_clean <- mls %>%
+  filter(!is.na(position_group),
+         !is.na(goals), !is.na(primary_assists), !is.na(points_added)) %>%
+  select(player_id, player_name, position_group, goals, primary_assists, points_added)
+
+# Summarize by player
+player_summary <- mls_clean %>%
+  group_by(player_id, player_name, position_group) %>%
+  summarise(
+    avg_goals = mean(goals, na.rm = TRUE),
+    avg_assists = mean(primary_assists, na.rm = TRUE),
+    avg_points = mean(points_added, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+#Decision Tree: Goals ~ Position Group Only
+tree_model <- rpart(avg_goals ~ position_group,
+                    data = player_summary,
+                    method = "anova")
+
+rpart.plot(tree_model, main = "Decision Tree: Goals ~ Position Group")
+
+#Random Forest: Goals ~ Position Group Only
+set.seed(42)
+rf_model <- randomForest(avg_goals ~ position_group,
+                         data = player_summary,
+                         importance = TRUE)
+
+print(rf_model)
+varImpPlot(rf_model, main = "Random Forest: Feature Importance (Position Only)")
+
+```
+
+*Decision Tree Analysis*
+Interpretation:
+The decision tree identified position group as the sole and most important split.
+The model clearly separates offensive and defensive players based on goal-scoring output.
+Offensive players (MF/FW) score significantly more goals on average than defensive players (DF/GK).
+There is no further split needed — position alone captures a major performance difference.
+Conclusion from Tree:
+The decision tree provides strong visual and statistical evidence that position has a major influence on goal-scoring. The difference (1.6 vs 7.3 goals) is substantial and intuitive, supporting your hypothesis.
+
+*Random Forest Analysis*
+The model recognizes position group as having some predictive power.
+However, because position is a single binary variable, the total variance explained is modest (6.07%).
+This tells us that position influences goal performance, but cannot explain it fully on its own — which makes sense, as goal-scoring also depends on factors like:
+Time played
+Individual talent
+Team tactics
+Role within position group (e.g., winger vs central mid)
+
+Conclusion from Random Forest:
+While the random forest explains only a small portion of the overall variance, it still highlights position as an important contributor to predicting goal-scoring output.
+
+```{r}
+# Load libraries
+#install.packages('xgboost')
+#install.packages('neuralnet')
+#install.packages('caret')
+library(tidyverse)
+library(caret)
+library(xgboost)
+library(neuralnet)
+
+# Load and prepare data
+mls <- read.csv("/Users/pallavigudipati/Desktop/Columbia-sem-II/MLS_combined_data_cleaned.csv")
+
+# Create broad positions
+mls <- mls %>%
+  mutate(primary_broad_position = case_when(
+    primary_general_position %in% c("CB", "FB", "WB") ~ "DF",
+    primary_general_position %in% c("CM", "DM", "AM") ~ "MF",
+    primary_general_position %in% c("ST", "SS", "W") ~ "FW",
+    primary_general_position == "GK" ~ "GK",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(position_group = case_when(
+    primary_broad_position %in% c("FW", "MF") ~ "Offensive",
+    primary_broad_position %in% c("DF", "GK") ~ "Defensive",
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(position_offensive = ifelse(position_group == "Offensive", 1, 0))
+
+# Filter data
+analysis_data <- mls %>%
+  filter(!is.na(position_offensive),
+         !is.na(goals), !is.na(primary_assists), !is.na(points_added)) %>%
+  select(position_offensive, goals, primary_assists, points_added)
+
+```
+
+```{r}
+# Train and test split
+set.seed(123)
+trainIndex <- createDataPartition(analysis_data$goals, p = 0.8, list = FALSE)
+train_data <- analysis_data[trainIndex, ]
+test_data <- analysis_data[-trainIndex, ]
+
+# Create DMatrix
+train_matrix <- xgb.DMatrix(data = as.matrix(train_data["position_offensive"]), label = train_data$goals)
+test_matrix <- xgb.DMatrix(data = as.matrix(test_data["position_offensive"]), label = test_data$goals)
+
+# Params
+params <- list(
+  objective = "reg:squarederror",
+  eval_metric = "rmse"
+)
+
+# Train model
+xgb_model <- xgb.train(
+  params = params,
+  data = train_matrix,
+  nrounds = 50,
+  watchlist = list(train = train_matrix, eval = test_matrix),
+  early_stopping_rounds = 5,
+  print_every_n = 10
+)
+
+# Predict
+preds <- predict(xgb_model, test_matrix)
+rmse <- sqrt(mean((preds - test_data$goals)^2))
+print(paste("XGBoost RMSE (Goals, position only):", rmse))
+
+```
+*Conclusion: XGBoost — Goals Based on Position Only*
+The model’s RMSE of 13.58 indicates that, on average, the predicted number of goals differs from the actual value by nearly 13.6 goals per player.
+
+```{r}
+# Normalize
+normalize <- function(x) (x - min(x)) / (max(x) - min(x))
+nn_data <- analysis_data %>%
+  mutate(goals = normalize(goals))
+
+# Train and test
+trainIndex <- createDataPartition(nn_data$goals, p = 0.8, list = FALSE)
+train_nn <- nn_data[trainIndex, ]
+test_nn <- nn_data[-trainIndex, ]
+
+# Train NN
+nn_model <- neuralnet(goals ~ position_offensive,
+                      data = train_nn,
+                      hidden = c(3),
+                      linear.output = TRUE)
+
+# Predict
+nn_preds <- compute(nn_model, test_nn["position_offensive"])$net.result
+
+# Denormalize
+denorm <- function(norm_val, original) {
+  norm_val * (max(original) - min(original)) + min(original)
+}
+actual <- denorm(test_nn$goals, analysis_data$goals)
+predicted <- denorm(nn_preds, analysis_data$goals)
+rmse_nn <- sqrt(mean((actual - predicted)^2))
+print(paste("Neural Net RMSE (Goals, position only):", rmse_nn))
+
+# Visualize
+plot(nn_model)
+
+```
+The neural network confirms that player position influences goal-scoring, but not strongly enough to serve as a sole predictor.
+The model learned that offensive players tend to score more, but couldn't accurately model individual goal totals.
+A RMSE of 10.5 goals shows that there’s still a lot of unexplained variance, which would likely be improved by:
+Adding more inputs (e.g., minutes played, age, team role), including categorical or performance-based metrics (e.g., shots, games played)
+
+
+
+*Per season offensive vs defensive*
+```{r}
+library(tidyverse)
+
+# dataset
+MLS_data <- read.csv("/Users/pallavigudipati/Desktop/Columbia-sem-II/MLS_combined_data_cleaned.csv")
+
+# Convert birth date and calculate age (optional)
+MLS_data$birth_date <- as.Date(MLS_data$birth_date)
+MLS_data$age <- as.numeric(difftime(as.Date("2025-01-01"), MLS_data$birth_date, units = "weeks")) %/% 52
+
+#Map general position to broad categories
+MLS_data <- MLS_data %>%
+  mutate(primary_broad_position = case_when(
+    primary_general_position %in% c("CB", "FB", "WB") ~ "DF",
+    primary_general_position %in% c("CM", "DM", "AM") ~ "MF",
+    primary_general_position %in% c("ST", "SS", "W") ~ "FW",
+    primary_general_position == "GK" ~ "GK",
+    TRUE ~ NA_character_
+  ))
+
+# Group into Offensive (FW, MF) and Defensive (DF, GK)
+MLS_data <- MLS_data %>%
+  mutate(position_group = case_when(
+    primary_broad_position %in% c("FW", "MF") ~ "Offensive",
+    primary_broad_position %in% c("DF", "GK") ~ "Defensive",
+    TRUE ~ NA_character_
+  ))
+
+# Count seasons from comma-separated string
+MLS_data <- MLS_data %>%
+  mutate(
+    number_of_seasons = ifelse(!is.na(season_name),
+                               str_count(season_name, ",") + 1,
+                               NA)
+  )
+
+#  Calculate per-season metrics
+MLS_data <- MLS_data %>%
+  mutate(
+    total_contribution = goals + primary_assists,
+    goals_assists_per_season = ifelse(!is.na(total_contribution) & number_of_seasons > 0,
+                                      total_contribution / number_of_seasons, NA),
+    points_per_season = ifelse(!is.na(points_added) & number_of_seasons > 0,
+                               points_added / number_of_seasons, NA)
+  )
+
+#  Filter clean data
+eda_data <- MLS_data %>%
+  filter(!is.na(position_group), !is.na(goals_assists_per_season), !is.na(points_per_season))
+
+#  Summary statistics
+summary_stats <- eda_data %>%
+  group_by(position_group) %>%
+  summarise(
+    avg_goals_assists_per_season = mean(goals_assists_per_season, na.rm = TRUE),
+    avg_points_per_season = mean(points_per_season, na.rm = TRUE),
+    sd_goals_assists = sd(goals_assists_per_season, na.rm = TRUE),
+    sd_points = sd(points_per_season, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  )
+
+print(summary_stats)
+
+
+# Boxplots for visual comparison
+
+# Goals + Assists per season
+ggplot(eda_data, aes(x = position_group, y = goals_assists_per_season, fill = position_group)) +
+  geom_boxplot() +
+  labs(title = "Goals + Assists per Season by Position Group",
+       y = "Goals + Assists per Season", x = "Position Group") +
+  theme_minimal()
+
+# Points Added per season
+ggplot(eda_data, aes(x = position_group, y = points_per_season, fill = position_group)) +
+  geom_boxplot() +
+  labs(title = "Points Added per Season by Position Group",
+       y = "Points per Season", x = "Position Group") +
+  theme_minimal()
+
+# Optional: Density plots
+ggplot(eda_data, aes(x = goals_assists_per_season, fill = position_group)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Goals + Assists per Season", x = "G+A per Season") +
+  theme_minimal()
+
+ggplot(eda_data, aes(x = points_per_season, fill = position_group)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribution of Points Added per Season", x = "Points per Season") +
+  theme_minimal()
+
+```
+
+
+
+
+
+```{r}
+# Run t-test for Goals + Assists per season
+t_test_goals_assists <- t.test(
+  goals_assists_per_season ~ position_group,
+  data = eda_data,
+  var.equal = FALSE  # Welch's t-test (recommended when variances differ)
+)
+
+# Run t-test for Points Added per season
+t_test_points <- t.test(
+  points_per_season ~ position_group,
+  data = eda_data,
+  var.equal = FALSE
+)
+
+# Print results
+print("T-test: Goals + Assists per Season")
+print(t_test_goals_assists)
+
+print("T-test: Points Added per Season")
+print(t_test_points)
+
+```
+
+
+```{r}
+# Mean and 95% CI calculation
+ci_data <- eda_data %>%
+  group_by(position_group) %>%
+  summarise(
+    mean_GA = mean(goals_assists_per_season),
+    sd_GA = sd(goals_assists_per_season),
+    n = n(),
+    se = sd_GA / sqrt(n),
+    lower_ci = mean_GA - qt(0.975, df = n - 1) * se,
+    upper_ci = mean_GA + qt(0.975, df = n - 1) * se
+  )
+
+# Plot
+ggplot(ci_data, aes(x = position_group, y = mean_GA, fill = position_group)) +
+  geom_bar(stat = "identity", width = 0.6, alpha = 0.7) +
+  geom_errorbar(aes(ymin = lower_ci, ymax = upper_ci), width = 0.2, color = "black") +
+  labs(
+    title = "Goals + Assists per Season by Position Group",
+    y = "Mean G+A per Season (w/ 95% CI)",
+    x = "Position Group"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Compute means and 95% CI for Points Added per Season
+ci_points <- eda_data %>%
+  group_by(position_group) %>%
+  summarise(
+    mean = mean(points_per_season, na.rm = TRUE),
+    sd = sd(points_per_season, na.rm = TRUE),
+    n = n(),
+    se = sd / sqrt(n),
+    lower_ci = mean - qt(0.975, df = n - 1) * se,
+    upper_ci = mean + qt(0.975, df = n - 1) * se
+  )
+
+# Plot
+ggplot(ci_points, aes(x = position_group, y = mean, fill = position_group)) +
+  geom_bar(stat = "identity", width = 0.6, alpha = 0.7) +
+  geom_errorbar(aes(ymin = lower_ci, ymax = upper_ci), width = 0.2) +
+  labs(
+    title = "Points Added per Season by Position Group (with 95% CI)",
+    y = "Mean Points per Season",
+    x = "Position Group"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+
+
+
+*Research Question: What types of performance-based player archetypes exist in MLS? and                               Do physical traits explain those archetypes, and can physical traits predict on-field performance?*
+
+
+```{r}
+
+# required packages
+packages <- c("dplyr", "ggplot2", "cluster", "factoextra", "tidyr", "RColorBrewer",
+              "caret", "rpart", "rpart.plot", "randomForest", "xgboost", "Metrics",
+              "neuralnet", "patchwork", "kableExtra", "lubridate")
+
+# interactive sessions
+if (interactive()) {
+  installed <- packages %in% rownames(installed.packages())
+  if (any(!installed)) install.packages(packages[!installed])
+}
+
+# Load all packages
+lapply(packages, library, character.only = TRUE)
+```
+
+# Data filtering for clustering
+```{r}
+library(dplyr)
+library(stringr)
+
+# dataset
+MLSdata <- read.csv("/Users/pallavigudipati/Desktop/Columbia-sem-II/MLS_combined_data_cleaned.csv")
+
+
+
+# Filter for midfielders and forwards (MF/FW), Only focusing on offensive players
+MF_FW_all <- MLSdata %>%
+  filter(primary_broad_position %in% c("MF", "FW"))
+
+# Add seasons_played by counting commas in season_name
+MF_FW_all <- MF_FW_all %>%
+  mutate(
+    seasons_played = ifelse(
+      is.na(season_name) | season_name == "", 
+      0, 
+      str_count(season_name, ",") + 1
+    )
+  )
+
+# Select performance metrics for clustering
+MF_FW_data <- MF_FW_all %>%
+  select(goals, primary_assists, key_passes, shots, minutes_played, points_added, seasons_played)
+
+# Scale performance metrics
+scaled_data <- scale(MF_FW_data)
+
+```
+
+# Elbow Plot
+```{r}
+set.seed(123)
+wss <- numeric()
+for (k in 1:10) {
+  kmeans_model <- kmeans(scaled_data, centers = k, nstart = 25, iter.max = 100)
+  wss[k] <- kmeans_model$tot.withinss
+}
+
+# Plot with Elbow Method
+plot(1:10, wss, type = "b", pch = 19,
+     xlab = "Number of Clusters (K)", ylab = "Within-Cluster Sum of Squares",
+     main = "Elbow Method for Choosing K")
+
+# Highlight K = 3
+abline(v = 3, lty = 2, col = "red")
+points(3, wss[3], col = "red", pch = 19, cex = 1.5)
+text(x = 3.5, y = wss[3] + 150, labels = "Chosen K = 3", col = "red", font = 2)
+```
+# Summary Table based on Offensive Performance
+```{r}
+library(dplyr)
+library(stringr)
+library(kableExtra)
+library(factoextra)
+
+# Re-run KMeans
+set.seed(123)
+best_k <- 3
+kmeans_result <- kmeans(scaled_data, centers = best_k, nstart = 25)
+MF_FW_all$Cluster <- as.factor(kmeans_result$cluster)
+
+# Add per-season stats
+MF_FW_all <- MF_FW_all %>%
+  mutate(
+    seasons_played = ifelse(is.na(season_name) | season_name == "", 0, str_count(season_name, ",") + 1),
+    goals_per_season = round(goals / seasons_played, 2),
+    assists_per_season = round(primary_assists / seasons_played, 2),
+    key_passes_per_season = round(key_passes / seasons_played, 2),
+    shots_per_season = round(shots / seasons_played, 2),
+    minutes_per_season = round(minutes_played / seasons_played, 0),
+    points_added_per_season = round(points_added / seasons_played, 2)
+  )
+
+# roles based on performance (Points Added)
+cluster_summary <- MF_FW_all %>%
+  group_by(Cluster) %>%
+  summarise(mean_points_added = mean(points_added_per_season, na.rm = TRUE),
+            n = n()) %>%
+  arrange(desc(mean_points_added)) %>%
+  mutate(AssignedRole = c("Elite Playmakers", "Reliable Starters", "Low Impact Players"))
+
+MF_FW_all <- MF_FW_all %>%
+  left_join(cluster_summary %>% select(Cluster, AssignedRole), by = "Cluster") %>%
+  mutate(Role = factor(AssignedRole, levels = c("Elite Playmakers", "Reliable Starters", "Low Impact Players")))
+
+# per-season performance summary
+performance_season_avg <- MF_FW_all %>%
+  filter(!is.na(Role)) %>%
+  group_by(Role) %>%
+  summarise(
+    `n` = n(),
+    `Goals/Season` = mean(goals_per_season, na.rm = TRUE),
+    `Assists/Season` = mean(assists_per_season, na.rm = TRUE),
+    `Shots/Season` = mean(shots_per_season, na.rm = TRUE),
+    `Minutes/Season` = mean(minutes_per_season, na.rm = TRUE),
+    `Points Added/Season` = mean(points_added_per_season, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Display table
+performance_table <- performance_season_avg %>%
+  kable(caption = "Average Per-Season Performance by Player Archetype") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE, position = "center") %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2c3e50") %>%
+  row_spec(1:nrow(performance_season_avg), background = "#f9f9f9")
+
+performance_table
+```
+
+# Statistical Tests
+```{r}
+library(dplyr)
+library(kableExtra)
+library(ggpubr)
+
+# Function for stars
+format_pval <- function(p) {
+  stars <- symnum(p, corr = FALSE,
+                  cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                  symbols = c("***", "**", "*", ""))
+  paste0("p = ", signif(p, 3), " ", stars)
+}
+
+# Metrics to analyze
+metrics <- c("goals", "primary_assists", "key_passes", "shots", "minutes_played", "points_added")
+
+# Initialize empty list to hold p-values
+pval_table <- data.frame(Metric = metrics)
+
+# Calculate pairwise p-values (e.g. Low vs Elite)
+get_pval <- function(var, group1, group2) {
+  x1 <- MF_FW_all %>% filter(Role == group1) %>% pull(!!sym(var))
+  x2 <- MF_FW_all %>% filter(Role == group2) %>% pull(!!sym(var))
+  p <- t.test(x1, x2)$p.value
+  format_pval(p)
+}
+
+# Adding comparisons to the table
+pval_table$'Low vs Reliable' <- sapply(metrics, get_pval, "Low Impact Players", "Reliable Starters")
+pval_table$'Low vs Elite'    <- sapply(metrics, get_pval, "Low Impact Players", "Elite Playmakers")
+pval_table$'Reliable vs Elite' <- sapply(metrics, get_pval, "Reliable Starters", "Elite Playmakers")
+
+# Pretty display
+kable(pval_table, caption = "Pairwise T-Test P-values for Performance Metrics by Role") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE, position = "center") %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2c3e50")
+
+# ANOVA
+season_metrics <- c("goals_per_season", "assists_per_season", "shots_per_season", "minutes_per_season", "points_added_per_season")
+
+anova_season_results <- data.frame(
+  Metric = season_metrics,
+  'ANOVA p-value' = sapply(season_metrics, function(metric) {
+    p <- summary(aov(as.formula(paste(metric, "~ Role")), data = MF_FW_all))[[1]][["Pr(>F)"]][1]
+    if (is.na(p)) return(NA)
+    if (p < 0.0001) return("< 0.0001")
+    else return(format(round(p, 4), nsmall = 4))
+  })
+)
+
+anova_season_table <- anova_season_results %>%
+  kable(caption = "ANOVA Results for Per-Season Metrics by Archetype") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE, position = "center") %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2c3e50")
+
+anova_season_table
+
+```
+
+# Physical Traits
+```{r}
+library(dplyr)
+library(kableExtra)
+library(factoextra)
+library(lubridate)
+
+# Prepare MF/FW data with physical + performance traits
+MF_FW_all <- MLSdata %>%
+  filter(primary_broad_position %in% c("MF", "FW")) %>%
+  mutate(
+    birth_date = ymd(birth_date),
+    age = as.numeric(floor(interval(start = birth_date, end = Sys.Date()) / years(1)))
+  ) %>%
+  select(player_name, age, height_cm, weight_lb,
+         goals, primary_assists, key_passes, shots,
+         minutes_played, points_added, primary_broad_position)
+
+# Performance data for clustering
+MF_FW_data <- MF_FW_all %>%
+  select(goals, primary_assists, key_passes, shots, minutes_played, points_added)
+
+# Scale and cluster
+scaled_data <- scale(MF_FW_data)
+set.seed(123)
+kmeans_result <- kmeans(scaled_data, centers = 3, nstart = 25)
+
+# Add cluster labels
+MF_FW_all$Cluster <- as.factor(kmeans_result$cluster)
+cluster_labels <- c("1" = "Low Impact Players",
+                    "2" = "Reliable Starters",
+                    "3" = "Elite Playmakers")
+MF_FW_all$Role <- cluster_labels[MF_FW_all$Cluster]
+MF_FW_all$Role <- factor(MF_FW_all$Role,
+                         levels = c("Low Impact Players", "Reliable Starters", "Elite Playmakers"))
+
+# Summarize physical traits
+physical_summary <- MF_FW_all %>%
+  group_by(Role) %>%
+  summarise(
+    'n' = n(),
+    'Average Age' = round(mean(age, na.rm = TRUE), 1),
+    'Average Height (cm)' = round(mean(height_cm, na.rm = TRUE), 1),
+    'Average Weight (lb)' = round(mean(weight_lb, na.rm = TRUE), 1),
+    .groups = "drop"
+  )
+
+# Output the table
+physical_summary %>%
+  kable(caption = "Average Physical Traits by Player Archetype") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE, position = "center") %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2c3e50") %>%
+  row_spec(1:nrow(physical_summary), background = "#f9f9f9")
+
+# Box Plots
+
+#install.packages("ggpubr")
+library(ggpubr)
+
+#  pairwise comparisons
+my_comparisons <- list(
+  c("Low Impact Players", "Reliable Starters"),
+  c("Low Impact Players", "Elite Playmakers"),
+  c("Reliable Starters", "Elite Playmakers")
+)
+
+# Custom function: p-value + stars
+label_pval_star <- function(p) {
+  stars <- symnum(p, corr = FALSE,
+                  cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                  symbols = c("***", "**", "*", ""))
+  paste0("p = ", signif(p, 3), " ", stars)
+}
+
+# Reusable function for clean plots
+plot_with_all_pvalues <- function(df, yvar, ylab, title, label_ys, ylim_vals) {
+  stat.test <- compare_means(as.formula(paste(yvar, "~ Role")),
+                             data = df, method = "t.test", paired = FALSE)
+  stat.test$y.position <- label_ys
+  stat.test$label <- mapply(label_pval_star, stat.test$p)
+
+  ggboxplot(df, x = "Role", y = yvar, fill = "Role", palette = "jco") +
+    stat_pvalue_manual(stat.test, label = "label", tip.length = 0.01, size = 4) +
+    labs(title = title, x = "Player Archetype", y = ylab) +
+    coord_cartesian(ylim = ylim_vals) +
+    theme_minimal() +
+    theme(legend.position = "none")
+}
+
+# Age Plot (adjust y-axis and labels)
+plot_with_all_pvalues(
+  MF_FW_all,
+  "age",
+  "Age",
+  "Age Distribution by Player Archetype",
+  label_ys = c(52, 56, 60),
+  ylim_vals = c(20, 63)
+)
+
+```
+
+# Statistical Analysis for Physical Traits
+```{r}
+# T-tests
+library(dplyr)
+library(ggpubr)
+library(knitr)
+library(kableExtra)
+
+# Function to label p-values with stars
+label_pval_star <- function(p) {
+  stars <- symnum(p, corr = FALSE,
+                  cutpoints = c(0, 0.001, 0.01, 0.05, 1),
+                  symbols = c("***", "**", "*", ""))
+  paste0("p = ", format.pval(p, digits = 3, eps = 0.001, scientific = TRUE), " ", stars)
+}
+
+# Variables to test
+traits <- c("age", "height_cm", "weight_lb")
+
+# Generate pairwise t-test results for each trait
+pairwise_results <- lapply(traits, function(var) {
+  test <- compare_means(as.formula(paste(var, "~ Role")),
+                        data = MF_FW_all, method = "t.test", paired = FALSE)
+  test$Metric <- var
+  test
+})
+
+# Combine and format
+results_df <- do.call(rbind, pairwise_results) %>%
+  mutate(
+    Comparison = paste(group1, "vs", group2),
+    P_Val_Label = mapply(label_pval_star, p)
+  ) %>%
+  select(Metric, Comparison, P_Val_Label)
+
+# Create table
+results_df %>%
+  kable(caption = "Pairwise t-test Results for Age, Height, and Weight by Player Archetype") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, position = "center") %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2c3e50")
+```
+
+# Decision Tree
+```{r}
+library(rpart)
+library(rpart.plot)
+library(Metrics)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(patchwork)
+
+# Reload MLSdata fresh
+MLSdata <- read.csv("/Users/pallavigudipati/Desktop/Columbia-sem-II/MLS_combined_data_cleaned.csv")
+
+# Filter for MF and FW players
+MF_FW_model_data <- MLSdata %>%
+  filter(primary_broad_position %in% c("MF", "FW")) %>%
+  mutate(
+    # Calculate age based on birth_date
+    birth_date = ymd(birth_date),
+    age = as.numeric(floor(interval(start = birth_date, end = Sys.Date()) / years(1))),
+    
+    # Create per-season stats
+    seasons_played = ifelse(is.na(season_name) | season_name == "", 0, stringr::str_count(season_name, ",") + 1),
+    goals_per_season = round(goals / seasons_played, 2),
+    assists_per_season = round(primary_assists / seasons_played, 2),
+    key_passes_per_season = round(key_passes / seasons_played, 2),
+    shots_per_season = round(shots / seasons_played, 2),
+    minutes_per_season = round(minutes_played / seasons_played, 0),
+    points_added_per_season = round(points_added / seasons_played, 2),
+    
+    # Create this manually
+    goals_plus_assists = goals + primary_assists
+  ) %>%
+  select(goals_plus_assists, points_added, age, height_cm, weight_lb)
+
+# Remove missing values
+MF_FW_model_data <- na.omit(MF_FW_model_data)
+
+set.seed(42)
+split_idx <- sample(nrow(MF_FW_model_data), 0.8 * nrow(MF_FW_model_data))
+train <- MF_FW_model_data[split_idx, ]
+test <- MF_FW_model_data[-split_idx, ]
+
+# Fit decision trees
+tree_gpa <- rpart(goals_plus_assists ~ age + height_cm + weight_lb, data = train)
+tree_pa <- rpart(points_added ~ age + height_cm + weight_lb, data = train)
+
+#Make predictions
+gpa_tree_preds <- predict(tree_gpa, newdata = test)
+pa_tree_preds <- predict(tree_pa, newdata = test)
+
+# Evaluate performance
+gpa_rmse <- rmse(test$goals_plus_assists, gpa_tree_preds)
+gpa_mae <- mae(test$goals_plus_assists, gpa_tree_preds)
+
+pa_rmse <- rmse(test$points_added, pa_tree_preds)
+pa_mae <- mae(test$points_added, pa_tree_preds)
+
+# Print Results
+cat("Decision Tree - Goals + Assists\n")
+cat("RMSE:", round(gpa_rmse, 2), "\n")
+cat("MAE:", round(gpa_mae, 2), "\n\n")
+
+cat("Decision Tree - Points Added\n")
+cat("RMSE:", round(pa_rmse, 2), "\n")
+cat("MAE:", round(pa_mae, 2), "\n\n")
+
+# Plot both trees side-by-side
+par(mfrow = c(1, 2))  # side-by-side
+rpart.plot(tree_gpa, main = "Decision Tree: Goals + Assists")
+rpart.plot(tree_pa, main = "Decision Tree: Points Added")
+par(mfrow = c(1, 1))
+```
+# Linear Regression
+```{r}
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+#MLSdata and filter
+MF_FW_all <- MLSdata %>%
+  filter(primary_broad_position %in% c("MF", "FW")) %>%
+  mutate(
+    birth_date = ymd(birth_date),  # Convert birth_date safely
+    age = as.numeric(floor(interval(birth_date, Sys.Date()) / years(1))),
+    seasons_played = ifelse(is.na(season_name) | season_name == "", 0, str_count(season_name, ",") + 1),
+    goals_plus_assists = goals + primary_assists,
+    goals_plus_assists_per_season = round(goals_plus_assists / seasons_played, 2),
+    points_added_per_season = round(points_added / seasons_played, 2)
+  ) %>%
+  filter(seasons_played > 0)  # Remove divide-by-zero issues
+
+#Fit multivariate linear regression
+multivar <- lm(cbind(goals_plus_assists_per_season, points_added_per_season) ~ age + height_cm + weight_lb, data = MF_FW_all)
+
+#  View the regression summary
+summary(multivar)
+
+```
+
+```{r}
+# Load packages
+library(ggplot2)
+library(dplyr)
+library(broom)
+
+# Tidy the multivariate model output
+coef1 <- tidy(multivar)[1:4, ] %>%
+  mutate(Outcome = "Goals + Assists/Season")
+coef2 <- tidy(multivar)[5:8, ] %>%
+  mutate(Outcome = "Points Added/Season")
+
+# Combine both model outputs
+coef_df <- bind_rows(coef1, coef2)
+
+# Clean variable names (inside mutate with case_when)
+coef_df <- coef_df %>%
+  mutate(term = case_when(
+    term == "(Intercept)" ~ "Intercept",
+    term == "age" ~ "Age",
+    term == "height_cm" ~ "Height",
+    term == "weight_lb" ~ "Weight",
+    TRUE ~ term
+  ))
+
+# Mark significance + filter out intercept
+coef_df <- coef_df %>%
+  filter(term != "Intercept") %>%
+  mutate(
+    Significance = ifelse(p.value < 0.05, "Significant", "Not Significant"),
+    term = factor(term, levels = c("Age", "Height", "Weight"))
+  )
+
+# Final Plot
+ggplot(coef_df, aes(x = term, y = estimate, fill = Significance)) +
+  geom_col(position = position_dodge(width = 0.8), color = "black", width = 0.6) +
+  facet_wrap(~Outcome) +
+  scale_fill_manual(values = c("Significant" = "#2ecc71", "Not Significant" = "#e74c3c")) +
+  geom_text(aes(label = paste0(ifelse(estimate > 0, "↑ ", "↓ "), round(estimate, 2))),
+            position = position_dodge(width = 0.8),
+            vjust = ifelse(coef_df$estimate > 0, -0.5, 1.5),
+            size = 5, fontface = "bold") +
+  expand_limits(y = c(min(coef_df$estimate) - 0.05, max(coef_df$estimate) + 0.05)) +
+  labs(
+    title = "Which Traits Predict Player Performance?",
+    x = "Trait", y = "Effect Size (Regression Coefficient)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(size = 18, face = "bold"),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 12),
+    panel.spacing = unit(1.5, "lines")
+  )
+```
+
+
+*Research Question: Which MLS players significantly deviate from their position-specific performance and physical norms, and what underlying traits explain these anomalies?*
+
+```{r}
+multivar <- lm(cbind(goals_plus_assists_per_season, points_added_per_season) ~ age + height_cm + weight_lb, data = MF_FW_all)
+
+model_gpa <- lm(goals_plus_assists_per_season ~ age + height_cm + weight_lb, data = MF_FW_all)
+summary(model_gpa)
+
+model_pts <- lm(points_added_per_season ~ age + height_cm + weight_lb, data = MF_FW_all)
+summary(model_pts)
+```
+
+
+```{r}
+model_gpa <- lm(goals_plus_assists_per_season ~ age + height_cm + weight_lb, data = MF_FW_all)
+model_pts <- lm(points_added_per_season ~ age + height_cm + weight_lb, data = MF_FW_all)
+
+```
+
+```{r}
+# Add predicted values and residuals for GPA
+MF_FW_all <- MF_FW_all %>%
+  mutate(
+    predicted_gpa = predict(model_gpa, newdata = MF_FW_all),
+    residual_gpa = goals_plus_assists_per_season - predicted_gpa
+  )
+
+# Add predicted values and residuals for Points Added
+MF_FW_all <- MF_FW_all %>%
+  mutate(
+    predicted_pts = predict(model_pts, newdata = MF_FW_all),
+    residual_pts = points_added_per_season - predicted_pts
+  )
+
+```
+
+```{r}
+# For Roles
+
+set.seed(123)
+kmeans_result <- kmeans(scaled_data, centers = 3, nstart = 25)
+
+# Assign clusters
+MF_FW_all$Cluster <- as.factor(kmeans_result$cluster)
+
+# Map clusters to human-readable roles
+cluster_labels <- c("1" = "Low Impact Players",
+                    "2" = "Reliable Starters",
+                    "3" = "Elite Playmakers")
+
+MF_FW_all$Role <- cluster_labels[MF_FW_all$Cluster]
+MF_FW_all$Role <- factor(MF_FW_all$Role,
+                         levels = c("Low Impact Players", "Reliable Starters", "Elite Playmakers"))
+
+```
+
+
+```{r}
+library(dplyr)
+
+# Top 2 Overperformers and Underperformers for Goals + Assists per Archetype
+top_anomalies_gpa <- MF_FW_all %>%
+  group_by(Role) %>%
+  arrange(desc(residual_gpa)) %>%
+  slice_head(n = 2) %>%
+  mutate(anomaly_type = "Overperformer")
+
+bottom_anomalies_gpa <- MF_FW_all %>%
+  group_by(Role) %>%
+  arrange(residual_gpa) %>%
+  slice_head(n = 2) %>%
+  mutate(anomaly_type = "Underperformer")
+
+# Combine
+final_anomalies_gpa <- bind_rows(top_anomalies_gpa, bottom_anomalies_gpa) %>%
+  arrange(Role, desc(anomaly_type))
+# View Table
+print(final_anomalies_gpa)
+
+ # Top 2 Overperformers and Underperformers for Points Added per Archetype
+top_anomalies_pts <- MF_FW_all %>%
+  group_by(Role) %>%
+  arrange(desc(residual_pts)) %>%
+  slice_head(n = 2) %>%
+  mutate(anomaly_type = "Overperformer")
+
+bottom_anomalies_pts <- MF_FW_all %>%
+  group_by(Role) %>%
+  arrange(residual_pts) %>%
+  slice_head(n = 2) %>%
+  mutate(anomaly_type = "Underperformer")
+
+# Combine
+final_anomalies_pts <- bind_rows(top_anomalies_pts, bottom_anomalies_pts) %>%
+  arrange(Role, desc(anomaly_type))
+# View Table
+print(final_anomalies_pts)
+
+# Top 2 Overperformers and Underperformers for Goals + Assists per Role
+top_overperformers_gpa <- MF_FW_all %>%
+  group_by(Role) %>%
+  arrange(desc(residual_gpa)) %>%
+  slice_head(n = 2) %>%
+  mutate(anomaly_type = "Overperformer")
+
+bottom_underperformers_gpa <- MF_FW_all %>%
+  group_by(Role) %>%
+  arrange(residual_gpa) %>%
+  slice_head(n = 2) %>%
+  mutate(anomaly_type = "Underperformer")
+
+# Combine the two
+final_anomalies_gpa <- bind_rows(top_overperformers_gpa, bottom_underperformers_gpa) %>%
+  ungroup() %>%
+  arrange(Role, desc(anomaly_type))
+
+# See Table
+final_anomalies_gpa %>%
+  select(Role, player_name, goals_plus_assists_per_season, predicted_gpa, residual_gpa, anomaly_type)
+
+
+ # Top 2 Overperformers and Underperformers for Points Added per Role
+top_overperformers_pts <- MF_FW_all %>%
+  group_by(Role) %>%
+  arrange(desc(residual_pts)) %>%
+  slice_head(n = 2) %>%
+  mutate(anomaly_type = "Overperformer")
+
+bottom_underperformers_pts <- MF_FW_all %>%
+  group_by(Role) %>%
+  arrange(residual_pts) %>%
+  slice_head(n = 2) %>%
+  mutate(anomaly_type = "Underperformer")
+
+# Combine the two
+final_anomalies_pts <- bind_rows(top_overperformers_pts, bottom_underperformers_pts) %>%
+  ungroup() %>%
+  arrange(Role, desc(anomaly_type))
+
+# Table
+final_anomalies_pts %>%
+  select(Role, player_name, points_added_per_season, predicted_pts, residual_pts, anomaly_type)
+ library(ggplot2)
+
+ggplot(final_anomalies_gpa, aes(x = reorder(player_name, residual_gpa), y = residual_gpa, fill = anomaly_type)) +
+  geom_col(show.legend = TRUE) +
+  coord_flip() +
+  facet_wrap(~ Role, scales = "free_y") +
+  scale_fill_manual(values = c("Overperformer" = "seagreen3", "Underperformer" = "firebrick")) +
+  labs(
+    title = "Top 2 Overperformers and Underperformers per Archetype (Goals + Assists)",
+    subtitle = "Residual = Actual - Predicted Goals + Assists per Season",
+    x = "Player",
+    y = "Residual",
+    fill = "Anomaly Type"
+  ) +
+  theme_minimal(base_size = 14)
+ ggplot(final_anomalies_pts, aes(x = reorder(player_name, residual_pts), y = residual_pts, fill = anomaly_type)) +
+  geom_col(show.legend = TRUE) +
+  coord_flip() +
+  facet_wrap(~ Role, scales = "free_y") +
+  scale_fill_manual(values = c("Overperformer" = "darkgreen", "Underperformer" = "firebrick")) +
+  labs(
+    title = "Top 2 Overperformers and Underperformers per Archetype (Points Added)",
+    subtitle = "Residual = Actual - Predicted Points Added per Season",
+    x = "Player",
+    y = "Residual",
+    fill = "Anomaly Type"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+
+
+
